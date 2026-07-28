@@ -1,21 +1,20 @@
 package ai
 
 import (
-	"crypto/hmac"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 )
 
 // License represents a feature license
 type License struct {
 	// License identification
-	LicenseID   string `json:"license_id"`
-	CustomerID  string `json:"customer_id"`
+	LicenseID    string `json:"license_id"`
+	CustomerID   string `json:"customer_id"`
 	CustomerName string `json:"customer_name,omitempty"`
 
 	// License type
@@ -61,7 +60,7 @@ type LicenseFeatures struct {
 	APIAccess          bool `json:"api_access"`          // Enterprise
 
 	// Limits
-	MaxProcessesPerScan int `json:"max_processes_per_scan"` // -1 for unlimited
+	MaxProcessesPerScan int `json:"max_processes_per_scan"`  // -1 for unlimited
 	MaxCloudCallsPerDay int `json:"max_cloud_calls_per_day"` // -1 for unlimited
 }
 
@@ -93,17 +92,22 @@ func DefaultFreeLicense() *License {
 // LicenseManager handles license validation and feature checks
 type LicenseManager struct {
 	license    *License
-	secretKey  []byte // For signature validation
+	publicKey  ed25519.PublicKey
 	configPath string
 }
 
 // NewLicenseManager creates a new license manager
 func NewLicenseManager() *LicenseManager {
-	return &LicenseManager{
+	lm := &LicenseManager{
 		license:    DefaultFreeLicense(),
-		secretKey:  []byte("ads-process-monitor-2026"), // In production, use proper key management
 		configPath: DefaultLicensePath(),
 	}
+	if encoded := os.Getenv("ADS_PROCESS_MONITOR_LICENSE_PUBLIC_KEY"); encoded != "" {
+		if key, err := base64.StdEncoding.DecodeString(encoded); err == nil && len(key) == ed25519.PublicKeySize {
+			lm.publicKey = ed25519.PublicKey(key)
+		}
+	}
+	return lm
 }
 
 // DefaultLicensePath returns the default license file path
@@ -170,20 +174,21 @@ func (lm *LicenseManager) validateLicense(license *License) error {
 
 // verifySignature verifies the license signature
 func (lm *LicenseManager) verifySignature(license *License) bool {
-	// Create signature payload
-	payload := strings.Join([]string{
-		license.LicenseID,
-		license.CustomerID,
-		string(license.Type),
-		license.ExpiresAt.Format(time.RFC3339),
-	}, "|")
+	if len(lm.publicKey) != ed25519.PublicKeySize {
+		return false
+	}
+	signature, err := base64.StdEncoding.DecodeString(license.Signature)
+	if err != nil {
+		return false
+	}
+	return ed25519.Verify(lm.publicKey, licensePayload(license), signature)
+}
 
-	// Compute expected signature
-	h := hmac.New(sha256.New, lm.secretKey)
-	h.Write([]byte(payload))
-	expected := base64.StdEncoding.EncodeToString(h.Sum(nil))
-
-	return hmac.Equal([]byte(expected), []byte(license.Signature))
+func licensePayload(license *License) []byte {
+	copy := *license
+	copy.Signature = ""
+	payload, _ := json.Marshal(copy)
+	return payload
 }
 
 // GetLicense returns the current license
@@ -306,23 +311,17 @@ func GenerateLicense(customerID, customerName string, licenseType LicenseType, v
 		}
 	}
 
-	// Generate signature
-	payload := strings.Join([]string{
-		license.LicenseID,
-		license.CustomerID,
-		string(license.Type),
-		license.ExpiresAt.Format(time.RFC3339),
-	}, "|")
-
-	h := hmac.New(sha256.New, secretKey)
-	h.Write([]byte(payload))
-	license.Signature = base64.StdEncoding.EncodeToString(h.Sum(nil))
+	// The license server derives its private signing key from its secret input.
+	// The corresponding public key is distributed separately to clients.
+	seed := sha256.Sum256(secretKey)
+	privateKey := ed25519.NewKeyFromSeed(seed[:])
+	license.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, licensePayload(license)))
 
 	return license
 }
 
 func generateLicenseID() string {
-	b := make([]byte, 16)
-	// In production, use crypto/rand
-	return base64.URLEncoding.EncodeToString(b)[:22]
+	// Use a hash-derived identifier so generated licenses are not all identical.
+	seed := sha256.Sum256([]byte(time.Now().UTC().Format(time.RFC3339Nano)))
+	return base64.URLEncoding.EncodeToString(seed[:])[:22]
 }

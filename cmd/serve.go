@@ -7,6 +7,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/afterdarksystems/ads-process-monitor/internal/ai"
 	"github.com/afterdarksystems/ads-process-monitor/internal/process"
 	"github.com/spf13/cobra"
 )
@@ -27,6 +28,13 @@ Endpoints:
 
 This mode is used by the ADS Security Console GUI.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		license := ai.NewLicenseManager()
+		if err := license.LoadLicense(""); err != nil && !license.HasFeature("http_server") {
+			return fmt.Errorf("HTTP server requires a valid license: %w", err)
+		}
+		if !license.HasFeature("http_server") {
+			return fmt.Errorf("HTTP server is not enabled for the current license")
+		}
 		mux := http.NewServeMux()
 
 		// Health check

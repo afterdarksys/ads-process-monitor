@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
+	"strings"
 	"time"
 )
 
@@ -90,7 +92,7 @@ func (ca *CloudAnalyzer) buildPrompt(ctx *ProcessContext) string {
 		}
 	}
 
-	return fmt.Sprintf(`You are a macOS security analyst AI. Analyze this process for potential threats.
+	prompt := fmt.Sprintf(`You are a macOS security analyst AI. Analyze this process for potential threats.
 
 PROCESS DATA:
 %s
@@ -122,7 +124,33 @@ Consider:
 5. Are there suspicious network connections?
 6. Is the process accessing sensitive files?
 
-Respond ONLY with the JSON, no other text.`, processJSON, parentJSON, ctx.NetworkConnections, ctx.OpenFiles)
+	Respond ONLY with the JSON, no other text.`, processJSON, parentJSON, ctx.NetworkConnections, ctx.OpenFiles)
+
+	return redactCloudData(prompt)
+}
+
+var cloudSecretPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)(authorization\s*:\s*bearer\s+)[^\s"']+`),
+	regexp.MustCompile(`(?i)(\b(?:password|passwd|secret|token|api[_-]?key)\s*[=:]\s*)[^\s,}"']+`),
+	regexp.MustCompile(`\b(?:ghp|github_pat|sk|xox[baprs])_[A-Za-z0-9_\-]{12,}\b`),
+	regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`),
+	regexp.MustCompile(`(?i)(/Users/|/home/|/var/|/private/)[^\s"']+`),
+}
+
+func redactCloudData(prompt string) string {
+	redacted := prompt
+	for _, pattern := range cloudSecretPatterns {
+		redacted = pattern.ReplaceAllStringFunc(redacted, func(value string) string {
+			if strings.HasPrefix(value, "/") || strings.HasPrefix(value, "Authorization") || strings.HasPrefix(value, "authorization") {
+				return "<redacted>"
+			}
+			if idx := strings.IndexAny(value, ":="); idx >= 0 {
+				return value[:idx+1] + "<redacted>"
+			}
+			return "<redacted>"
+		})
+	}
+	return redacted
 }
 
 func (ca *CloudAnalyzer) callAnthropic(prompt string) (string, error) {
